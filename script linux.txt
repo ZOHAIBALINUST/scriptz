@@ -1,0 +1,959 @@
+
+# nano ~/Linux_Compliance_Audit.sh
+# paste the script, save with Ctrl+O, exit with Ctrl+X
+#chmod +x ~/Linux_Compliance_Audit.sh
+#sudo ~/Linux_Compliance_Audit.sh
+#sudo ~/Linux_Compliance_Audit.sh --output /srv/audits      # choose the output folder
+#sudo ~/Linux_Compliance_Audit.sh --no-internet            # skip the public IP lookup (checkpoint 29)
+
+
+
+#!/usr/bin/env bash
+# =============================================================================
+#  Linux Endpoint Security Compliance Audit - 41 checkpoints (READ-ONLY)
+#  Indicative mapping: CIS Controls v8.1 / ISO/IEC 27001:2022 Annex A /
+#  NIST SP 800-53 Rev.5 (verify against your own statement of applicability)
+#
+#  Output: <HOST>_<IPv4>_<YYYY-MM-DD_HH-MM-SS>/ created next to this script
+#          (or --output DIR). Contains 01_*.txt ... 41_*.txt, 00_RunLog.txt
+#          and 00_COMPREHENSIVE_REPORT_*.txt.
+#  Usage:  sudo ./Linux_Compliance_Audit.sh [--output DIR] [--no-internet]
+# =============================================================================
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+NO_INTERNET=0
+OUT_OVERRIDE=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-internet) NO_INTERNET=1 ;;
+        --output)      OUT_OVERRIDE="${2:-}"; shift ;;
+        -h|--help)     echo "Usage: sudo $0 [--output DIR] [--no-internet]"; exit 0 ;;
+        *)             echo "Unknown option: $1"; exit 1 ;;
+    esac
+    shift
+done
+
+ok()  { command -v "$1" >/dev/null 2>&1; }
+ROOT=0; [ "$(id -u)" -eq 0 ] && ROOT=1
+
+HOST="$(hostname -s 2>/dev/null || cat /etc/hostname 2>/dev/null || echo unknown)"
+TS="$(date +%Y-%m-%d_%H-%M-%S)"
+RUN_DT="$(date '+%Y-%m-%d %H:%M:%S')"
+IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+[ -z "$IP" ] && IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+[ -z "$IP" ] && IP="NoIPv4"
+IP_SAFE="$(echo "$IP" | tr -c 'A-Za-z0-9.-' '_')"
+
+FOLDER="${HOST}_${IP_SAFE}_${TS}"
+BASE_ROOT="${OUT_OVERRIDE:-$SCRIPT_DIR}"
+BASE="$BASE_ROOT/$FOLDER"
+if ! mkdir -p "$BASE" 2>/dev/null; then
+    BASE_ROOT="$HOME/Desktop"; [ -d "$BASE_ROOT" ] || BASE_ROOT="$HOME"
+    BASE="$BASE_ROOT/$FOLDER"
+    mkdir -p "$BASE" || { echo "[!] Cannot create output folder."; exit 1; }
+    echo "[!] Script folder not writable. Output goes to: $BASE"
+fi
+
+exec > >(tee -a "$BASE/00_RunLog.txt") 2>&1
+
+echo "=================================================================="
+echo " LINUX ENDPOINT SECURITY COMPLIANCE AUDIT - 41 CHECKPOINTS"
+echo "=================================================================="
+echo " Host         : $HOST"
+echo " IPv4         : $IP"
+echo " User         : $(id -un) (uid $(id -u))  root=$([ $ROOT -eq 1 ] && echo yes || echo no)"
+echo " Started      : $RUN_DT"
+echo " Output       : $BASE"
+echo "=================================================================="
+if [ $ROOT -eq 0 ]; then
+    echo "[!] Not running as root. Several checks will be partial."
+    echo "    Re-run with: sudo $0"
+fi
+echo
+
+# -----------------------------------------------------------------------------
+# Check runner
+# -----------------------------------------------------------------------------
+run_check() {
+    local n="$1" title="$2" fn="$3" cis="$4" iso="$5" nist="$6"
+    local slug file body
+    slug="$(echo "$title" | sed -e 's/&/and/g' -e 's/[^A-Za-z0-9]\+/_/g' -e 's/^_//' -e 's/_$//')"
+    file="$BASE/$(printf '%02d' "$n")_${slug}.txt"
+    body="$( ( $fn ) 2>&1 )"
+    if [ -z "$(echo "$body" | tr -d '[:space:]')" ]; then
+        body="No data returned. The tool may be missing, or the check needs root."
+    fi
+    {
+        echo "=================================================================="
+        echo "CHECKPOINT $n : $title"
+        echo "------------------------------------------------------------------"
+        echo "Computer   : $HOST"
+        echo "IPv4       : $IP"
+        echo "User       : $(id -un) (uid $(id -u)); root=$([ $ROOT -eq 1 ] && echo yes || echo no)"
+        echo "Timestamp  : $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "Mapping    : CIS v8.1 $cis | ISO 27001:2022 $iso | NIST SP 800-53 $nist"
+        echo "=================================================================="
+        echo
+        echo "$body"
+    } > "$file"
+    printf '[%02d/41] %-42s -> %s\n' "$n" "$title" "$(basename "$file")"
+}
+
+# -----------------------------------------------------------------------------
+# CHECKPOINTS 1-10: identity, accounts, authentication
+# -----------------------------------------------------------------------------
+chk01() {
+    echo "Hostname      : $HOST"
+    echo "Machine ID    : $(cat /etc/machine-id 2>/dev/null)"
+    echo
+    hostnamectl 2>/dev/null || uname -a
+    echo
+    if [ $ROOT -eq 1 ] && ok dmidecode; then
+        dmidecode -s system-manufacturer -s system-product-name -s system-serial-number 2>&1
+    else
+        echo "Hardware identifiers (dmidecode) require root."
+    fi
+    echo
+    echo "Primary IPv4 (recorded for this audit): $IP"
+    echo
+    ip -br addr 2>/dev/null
+}
+
+chk02() {
+    echo "Logged-in sessions:"; who 2>/dev/null; echo
+    echo "Interactive accounts (login shell is not nologin/false):"
+    awk -F: '$7 !~ /(nologin|false)$/ {print "  "$1"  uid="$3"  shell="$7"  home="$6}' /etc/passwd
+    echo
+    echo "NOTE: Compare each owner against the organisation's asset register."
+}
+
+chk03() {
+    cat /etc/os-release 2>/dev/null
+    echo
+    echo "Kernel       : $(uname -r)"
+    echo "Architecture : $(uname -m)"
+    echo "Uptime       : $(uptime -p 2>/dev/null)"
+    echo "Last boot    : $(who -b 2>/dev/null)"
+    echo
+    echo "NOTE: Confirm the release is still supported by the vendor (check end-of-life dates)."
+}
+
+chk04() {
+    if ok realm; then
+        realm list 2>&1 || echo "No realm-joined directory domain."
+    else
+        echo "realm (realmd) not installed."
+    fi
+    echo
+    if [ -f /etc/sssd/sssd.conf ]; then echo "sssd.conf present (directory integration configured)."; else echo "No sssd.conf found."; fi
+    if [ -f /etc/krb5.conf ]; then echo; echo "Kerberos default realm:"; grep -i 'default_realm' /etc/krb5.conf; fi
+    echo
+    echo "Samba workgroup/realm settings (if Samba is installed):"
+    grep -iE '^\s*(workgroup|realm|security)\s*=' /etc/samba/smb.conf 2>/dev/null || echo "  no smb.conf"
+}
+
+chk05() {
+    for g in sudo wheel admin adm docker lxd; do
+        echo "Group '$g':"
+        getent group "$g" 2>/dev/null | awk -F: '{print "   members: "$4}'
+    done
+    echo
+    echo "Accounts with UID 0 (root-equivalent):"
+    awk -F: '$3==0 {print "  "$1}' /etc/passwd
+    echo
+    echo "NOTE: docker and lxd membership is equivalent to root. Review every member."
+}
+
+chk06() {
+    if [ $ROOT -eq 0 ]; then echo "Run as root to read every sudoers file."; echo; fi
+    for f in /etc/sudoers /etc/sudoers.d/*; do
+        [ -r "$f" ] || continue
+        echo "--- $f"
+        grep -vE '^\s*(#|$)' "$f"
+        echo
+    done
+    echo "Entries with NOPASSWD (root without password):"
+    grep -rhE 'NOPASSWD' /etc/sudoers /etc/sudoers.d 2>/dev/null || echo "  none found"
+    echo
+    echo "Recent sudo activity:"
+    if ok journalctl; then
+        journalctl _COMM=sudo --no-pager -n 20 2>/dev/null
+    else
+        tail -20 /var/log/auth.log 2>/dev/null | grep -i sudo || echo "  no log available"
+    fi
+}
+
+chk07() {
+    echo "Human and service accounts (UID 1000-65533):"
+    awk -F: '$3>=1000 && $3<65534 {print "  "$1"  uid="$3"  shell="$7"  home="$6}' /etc/passwd
+    echo
+    echo "Accounts with an empty password field:"
+    if [ $ROOT -eq 1 ]; then
+        awk -F: '$2=="" {print "  EMPTY PASSWORD: "$1}' /etc/shadow
+    else
+        echo "  requires root"
+    fi
+    echo
+    echo "Last logins:"
+    lastlog 2>/dev/null | awk 'NR==1 || $0 !~ /Never/' | head -60
+    echo
+    echo "NOTE: Every account must map to an approved person or service. Lock or remove accounts that are unused."
+}
+
+chk08() {
+    echo "/etc/login.defs settings:"
+    grep -E '^\s*(PASS_MAX_DAYS|PASS_MIN_DAYS|PASS_WARN_AGE|PASS_MIN_LEN|ENCRYPT_METHOD|UMASK)' /etc/login.defs 2>/dev/null
+    echo
+    echo "pwquality.conf (non-comment lines):"
+    grep -vE '^\s*(#|$)' /etc/security/pwquality.conf 2>/dev/null || echo "  not configured"
+    echo
+    echo "PAM password lines:"
+    grep -hE 'pam_pwquality|pam_unix' /etc/pam.d/common-password /etc/pam.d/system-auth 2>/dev/null || echo "  not found"
+    echo
+    echo "Per-account aging (root only):"
+    if [ $ROOT -eq 1 ]; then
+        awk -F: '$2 ~ /^\$/ {print "  "$1"  last_change="$3"  min="$4"  max="$5}' /etc/shadow | head -50
+    else
+        echo "  requires root"
+    fi
+    echo
+    echo "BENCHMARK: PASS_MAX_DAYS 365 or less; minimum length 14 or more; password quality module active."
+}
+
+chk09() {
+    echo "Shell idle timeout (TMOUT):"
+    grep -rhE 'TMOUT' /etc/profile /etc/profile.d /etc/bash.bashrc 2>/dev/null || echo "  not set"
+    echo
+    echo "Desktop screen lock defaults (GNOME, if present):"
+    if ok gsettings; then
+        gsettings list-recursively org.gnome.desktop.session idle-delay 2>/dev/null || echo "  not readable in this session"
+        gsettings list-recursively org.gnome.desktop.screensaver lock-enabled 2>/dev/null || true
+    else
+        echo "  gsettings not available"
+    fi
+    echo
+    echo "dconf policy locks:"
+    grep -rhE 'idle-delay|lock-enabled|lock-delay' /etc/dconf/db 2>/dev/null || echo "  none found"
+    echo
+    echo "BENCHMARK: screen lock within 15 minutes (900 seconds) with a password required on resume."
+}
+
+chk10() {
+    echo "Groups of the current user:"; id; echo
+    echo "Sudo rules that allow package managers or installers:"
+    grep -rhE '(apt|apt-get|dnf|yum|rpm|dpkg|snap|pip)' /etc/sudoers /etc/sudoers.d 2>/dev/null || echo "  none found"
+    echo
+    echo "World-writable entries in system binary directories:"
+    for d in /usr/local/bin /usr/bin /usr/sbin /opt; do
+        [ -d "$d" ] && find "$d" -maxdepth 1 -perm -o+w 2>/dev/null | head -20 | sed 's/^/  /'
+    done
+    echo
+    echo "Automatic update configuration:"
+    cat /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null || echo "  apt auto-upgrades not configured (or not Debian/Ubuntu)"
+    echo
+    echo "NOTE: Standard users must not be able to install software system-wide."
+}
+
+# -----------------------------------------------------------------------------
+# CHECKPOINTS 11-21: patching, software, anti-malware
+# -----------------------------------------------------------------------------
+chk11() {
+    if ok apt-get; then
+        echo "Package index last refreshed:"
+        stat -c '  %y  %n' /var/lib/apt/periodic/update-success-stamp /var/cache/apt/pkgcache.bin 2>/dev/null || echo "  unknown"
+        echo
+        echo "Recent apt history:"
+        grep -E '^(Start-Date|End-Date)' /var/log/apt/history.log 2>/dev/null | tail -6 || echo "  no history"
+        echo
+        echo "Pending security updates:"
+        apt-get -s upgrade 2>/dev/null | grep '^Inst' | grep -i security | head -50
+        echo "  count: $(apt-get -s upgrade 2>/dev/null | grep -ci '^Inst.*security')"
+    elif ok dnf; then
+        echo "Pending security updates:"
+        dnf -q updateinfo list --security 2>/dev/null | head -50
+        echo
+        echo "Recent transactions:"
+        dnf history list 2>/dev/null | head -15
+    elif ok yum; then
+        echo "Pending security updates:"
+        yum -q updateinfo list security 2>/dev/null | head -50
+    else
+        echo "No supported package manager found (apt, dnf or yum)."
+    fi
+    echo
+    if [ -f /var/run/reboot-required ]; then
+        echo "REBOOT REQUIRED: pending kernel or library updates are not yet active."
+    else
+        echo "No reboot-required flag set."
+    fi
+    echo "BENCHMARK: no security updates pending for longer than 14 days."
+}
+
+chk12() {
+    echo "Running kernel: $(uname -r)"
+    echo
+    if ok dpkg-query; then
+        echo "Installed kernel images:"
+        dpkg-query -W -f='  ${Package} ${Version}\n' 'linux-image-*' 2>/dev/null
+        echo
+        echo "Total upgradable packages: $(apt-get -s upgrade 2>/dev/null | grep -c '^Inst')"
+    elif ok rpm; then
+        echo "Installed kernels:"; rpm -q kernel 2>/dev/null | sed 's/^/  /'
+        echo
+        dnf -q check-update >/dev/null 2>&1
+        echo "dnf check-update exit code: $? (100 = updates available, 0 = none)"
+    fi
+    echo
+    echo "Automatic update services:"
+    systemctl is-enabled unattended-upgrades dnf-automatic.timer 2>/dev/null || echo "  none enabled"
+    echo
+    echo "BENCHMARK: kernel and core libraries current; reboot after kernel updates."
+}
+
+chk13() {
+    if ok clamscan || ok freshclam; then
+        freshclam --version 2>/dev/null | head -1
+        echo
+        echo "Signature database files:"
+        ls -l --time-style=long-iso /var/lib/clamav/*.cvd /var/lib/clamav/*.cld 2>/dev/null || echo "  none found"
+        echo
+        echo "Last freshclam log lines:"
+        tail -10 /var/log/clamav/freshclam.log 2>/dev/null || echo "  no log"
+        echo
+        echo "BENCHMARK: signature database should be less than 1 day old."
+    else
+        echo "ClamAV is not installed. No signature-based antivirus is present (see checkpoint 17)."
+    fi
+}
+
+chk14() {
+    pkgs="openssl openssh-server sudo bash curl wget libc6 glibc kernel nginx apache2 httpd mysql-server mariadb-server postgresql php python3 openjdk-17-jre java-17-openjdk firefox firefox-esr chromium google-chrome-stable docker-ce containerd samba"
+    echo "Installed versions of selected high-risk packages:"
+    if ok dpkg-query; then
+        for p in $pkgs; do
+            v="$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null)"
+            [ -n "$v" ] && printf '  %-28s %s\n' "$p" "$v"
+        done
+    elif ok rpm; then
+        for p in $pkgs; do
+            v="$(rpm -q --qf '%{VERSION}-%{RELEASE}' "$p" 2>/dev/null)"
+            case "$v" in *"not installed"*|"") ;; *) printf '  %-28s %s\n' "$p" "$v" ;; esac
+        done
+    fi
+    echo
+    if ok snap; then echo "Snap packages:"; snap list 2>/dev/null | head -40; echo; fi
+    if ok flatpak; then echo "Flatpak applications:"; flatpak list --app 2>/dev/null; echo; fi
+    echo "NOTE: Compare each version with the current vendor security advisory (USN, RHSA, or equivalent)."
+}
+
+chk15() {
+    if ok dpkg-query; then
+        echo "Installed packages, total: $(dpkg-query -W 2>/dev/null | wc -l)"
+        dpkg-query -W -f='${Package} ${Version}\n' 2>/dev/null
+    elif ok rpm; then
+        echo "Installed packages, total: $(rpm -qa | wc -l)"
+        rpm -qa --qf '%{NAME} %{VERSION}-%{RELEASE}\n' | sort
+    fi
+    echo
+    if ok snap; then echo "Snaps:"; snap list 2>/dev/null; echo; fi
+    if ok flatpak; then echo "Flatpaks:"; flatpak list 2>/dev/null; echo; fi
+    echo "Manually installed software in /usr/local and /opt:"
+    ls -la /usr/local/bin /opt 2>/dev/null
+    echo
+    echo "NOTE: Compare against the approved and licensed software list. Look for unlicensed commercial software and unmanaged downloads."
+}
+
+chk16() {
+    echo "Packages that are often unnecessary on servers and endpoints (dual-use tools included for review):"
+    for p in telnet telnetd rsh-server rsh-client talk talkd ftp vsftpd tftp tftpd-hpa xinetd nis ypserv ypbind rpcbind avahi-daemon cups snmpd nmap wireshark john hydra aircrack-ng; do
+        present=0
+        if ok dpkg-query && dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed'; then present=1; fi
+        if ok rpm && rpm -q "$p" >/dev/null 2>&1; then present=1; fi
+        [ $present -eq 1 ] && echo "  PRESENT : $p"
+    done
+    echo
+    echo "NOTE: Presence is not automatically a violation. Confirm the business need and remove anything unused."
+}
+
+chk17() {
+    echo "Endpoint security products found (binary, process, or unit file):"
+    for name in clamd freshclam falcon-sensor falcond sentinelagent sentinelctl sophos-spl savd esets wazuh-agent ossec-agentd osqueryd auditd fapolicyd rkhunter chkrootkit; do
+        if ok "$name" || pgrep -x "$name" >/dev/null 2>&1 || systemctl list-unit-files --no-pager 2>/dev/null | awk '{print $1}' | grep -qx "$name.service"; then
+            echo "  FOUND : $name"
+        fi
+    done
+    echo
+    echo "Security-related services:"
+    systemctl list-units --type=service --all --no-pager 2>/dev/null | grep -iE 'clam|falcon|sentinel|sophos|eset|wazuh|ossec|osquery|auditd|fapolicy|crowdstrike|trend|cylance' || echo "  none matched"
+    echo
+    echo "NOTE: Confirm each agent is enrolled with central management, not only installed."
+}
+
+chk18() {
+    for svc in clamav-daemon clamd@scan clamd falcon-sensor SentinelAgent wazuh-agent auditd; do
+        systemctl list-unit-files --no-pager 2>/dev/null | awk '{print $1}' | grep -qx "$svc.service" || continue
+        st="$(systemctl is-active "$svc" 2>/dev/null)"
+        en="$(systemctl is-enabled "$svc" 2>/dev/null)"
+        printf '  %-18s active=%-10s enabled=%s\n' "$svc" "${st:-unknown}" "${en:-unknown}"
+    done
+    echo
+    echo "Running security processes:"
+    ps -eo pid,user,comm 2>/dev/null | grep -iE 'clamd|falcon|sentinel|wazuh|osqueryd|auditd|fapolicy' || echo "  none running"
+    echo
+    echo "BENCHMARK: an on-access or real-time protection service must be active and enabled."
+}
+
+chk19() {
+    if ok clamscan; then clamscan --version 2>/dev/null; else echo "ClamAV not installed."; fi
+    echo
+    if ok rkhunter; then rkhunter --versioncheck 2>/dev/null | head -3; fi
+    echo
+    echo "Update timers:"
+    systemctl list-timers --all --no-pager 2>/dev/null | grep -iE 'clam|freshclam' || echo "  no ClamAV update timer"
+    echo
+    echo "Update service state:"
+    systemctl is-active clamav-freshclam 2>/dev/null || echo "  clamav-freshclam not present"
+}
+
+chk20() {
+    echo "ClamAV exclusion settings:"
+    for f in /etc/clamav/clamd.conf /etc/clamav/clamd.conf.d/* /etc/clamd.d/scan.conf; do
+        [ -r "$f" ] || continue
+        echo "--- $f"
+        grep -hiE '^\s*Exclude' "$f" || echo "  no exclusions"
+    done
+    echo
+    echo "rkhunter allow-list settings:"
+    grep -hiE '^(ALLOW|PKGMGR|WHITELIST)' /etc/rkhunter.conf 2>/dev/null || echo "  not configured"
+    echo
+    echo "NOTE: Every exclusion weakens detection. Record an owner and an approval for each."
+}
+
+chk21() {
+    found=0
+    for log in /var/log/clamav/clamav.log /var/log/clamav/clamscan.log /var/log/rkhunter.log /var/log/chkrootkit.log; do
+        if [ -f "$log" ]; then
+            found=1
+            echo "--- $log (modified $(stat -c %y "$log" 2>/dev/null))"
+            tail -5 "$log"
+            echo
+        fi
+    done
+    [ $found -eq 0 ] && echo "No malware scan logs found. There is no scheduled scan evidence on this host."
+    echo "BENCHMARK: a scheduled scan should run at least weekly and leave a recent log."
+}
+
+# -----------------------------------------------------------------------------
+# CHECKPOINTS 22-32: network, services, sharing, browsers
+# -----------------------------------------------------------------------------
+chk22() {
+    if ok ufw; then echo "UFW:"; ufw status verbose 2>&1; echo; fi
+    if ok firewall-cmd; then echo "firewalld state: $(firewall-cmd --state 2>&1)"; firewall-cmd --list-all 2>&1; echo; fi
+    if ok nft; then echo "nftables (first 80 lines):"; nft list ruleset 2>/dev/null | head -80; echo; fi
+    if ok iptables; then
+        echo "iptables default policies:"; iptables -S 2>/dev/null | grep '^-P'
+        echo "iptables rule count: $(iptables -S 2>/dev/null | grep -c '^-A')"; echo
+    fi
+    echo "Firewall service state:"
+    systemctl is-active ufw firewalld nftables 2>/dev/null
+    echo
+    echo "BENCHMARK: one managed firewall active with default-deny inbound."
+}
+
+chk23() {
+    echo "Listening TCP and UDP sockets:"
+    if ok ss; then ss -tulnp 2>/dev/null; else netstat -tulnp 2>/dev/null || echo "ss and netstat not available"; fi
+    echo
+    [ $ROOT -eq 0 ] && echo "NOTE: run as root to see process names for every socket."
+    echo "NOTE: every listening port must map to an approved service."
+}
+
+chk24() {
+    for u in telnet.socket rsh.socket rlogin.socket rexec.socket vsftpd proftpd pure-ftpd tftp.socket xinetd rpcbind rpc-statd nfs-server avahi-daemon cups cups-browsed bluetooth snmpd smbd nmbd rsync dovecot exim4 postfix named bind9 isc-dhcp-server; do
+        st="$(systemctl is-active "$u" 2>/dev/null)"
+        en="$(systemctl is-enabled "$u" 2>/dev/null)"
+        if [ "$st" = "active" ] || [ "$en" = "enabled" ]; then
+            printf '  %-22s active=%-8s enabled=%s\n' "$u" "$st" "$en"
+        fi
+    done
+    echo
+    echo "All running services:"
+    systemctl list-units --type=service --state=running --no-pager 2>/dev/null
+    echo
+    echo "NOTE: stop and disable any service the host role does not require."
+}
+
+chk25() {
+    if [ -f /etc/samba/smb.conf ]; then
+        echo "Samba protocol and signing settings:"
+        grep -iE 'min protocol|max protocol|ntlm auth|server signing|client signing' /etc/samba/smb.conf || echo "  not set. Set them explicitly; defaults can allow older dialects."
+        if ok testparm; then
+            echo; echo "Effective values (testparm):"
+            testparm -s 2>/dev/null | grep -iE 'min protocol|ntlm auth|signing'
+        fi
+    else
+        echo "Samba is not configured (/etc/samba/smb.conf absent)."
+    fi
+    echo
+    echo "SMB1 (vers=1.0) mounts:"
+    grep -E 'vers=1(\.0)?[, ]' /proc/mounts /etc/fstab 2>/dev/null || echo "  none"
+    echo
+    echo "BENCHMARK: SMB1 disabled; minimum protocol SMB2 or higher."
+}
+
+chk26() {
+    if ok sshd; then
+        if [ $ROOT -eq 1 ]; then
+            echo "Effective sshd settings (sshd -T):"
+            sshd -T 2>/dev/null | grep -E '^(permitrootlogin|passwordauthentication|permitemptypasswords|pubkeyauthentication|maxauthtries|x11forwarding|allowusers|allowgroups|port|logingracetime|clientaliveinterval|clientalivecountmax) '
+        else
+            echo "Run as root for effective sshd settings. Configuration file:"
+            grep -vE '^\s*(#|$)' /etc/ssh/sshd_config 2>/dev/null
+        fi
+    else
+        echo "OpenSSH server (sshd) is not installed."
+    fi
+    echo
+    echo "Other remote-access services:"
+    for s in xrdp vncserver@1 x11vnc tigervnc teamviewerd anydesk; do
+        st="$(systemctl is-active "$s" 2>/dev/null)"
+        [ "$st" = "active" ] && echo "  ACTIVE : $s"
+    done
+    echo
+    echo "BENCHMARK: PermitRootLogin no; PasswordAuthentication no (keys only); PermitEmptyPasswords no; MaxAuthTries 4 or less."
+}
+
+chk27() {
+    echo "NFS exports (/etc/exports):"
+    grep -vE '^\s*(#|$)' /etc/exports 2>/dev/null || echo "  none"
+    echo
+    if ok exportfs; then echo "Active NFS exports:"; exportfs -v 2>/dev/null; echo; fi
+    echo "Samba shares:"
+    if ok testparm; then testparm -s 2>/dev/null | grep -E '^\['; else echo "  Samba not installed"; fi
+    echo
+    echo "Shares open to guests or writable by everyone:"
+    grep -iE 'guest ok *= *yes|writable *= *yes|read only *= *no' /etc/samba/smb.conf 2>/dev/null || echo "  none"
+    echo
+    echo "World-writable directories without the sticky bit (common data paths):"
+    find /srv /home /opt /var/www -xdev -type d -perm -0002 ! -perm -1000 2>/dev/null | head -20 | sed 's/^/  /'
+    echo
+    echo "NOTE: flag any share granting write access to everyone."
+}
+
+chk28() {
+    echo "Interfaces:"; ip -br addr 2>/dev/null; echo
+    echo "Routes:"; ip route 2>/dev/null; echo
+    echo "Default gateway: $(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')"; echo
+    echo "DNS resolvers:"
+    if ok resolvectl; then resolvectl status 2>/dev/null | grep -E 'DNS Servers|Current DNS'; else grep '^nameserver' /etc/resolv.conf 2>/dev/null; fi
+    echo
+    echo "Wireless interfaces:"; iw dev 2>/dev/null || echo "  none or iw not installed"
+    echo
+    if ok nmcli; then
+        echo "Saved Wi-Fi profiles and key management (no passwords shown):"
+        nmcli -t -f NAME,TYPE connection show 2>/dev/null | while IFS=: read -r name type; do
+            if [ "$type" = "802-11-wireless" ]; then
+                km="$(nmcli -g 802-11-wireless-security.key-mgmt connection show "$name" 2>/dev/null)"
+                echo "  $name  key-mgmt=${km:-OPEN (no security)}"
+            fi
+        done
+    fi
+    echo
+    echo "NOTE: Wi-Fi should use WPA2-Enterprise or WPA3. Open networks should not be saved."
+}
+
+chk29() {
+    echo "Internal IPv4 of this host: $IP"
+    if [ $NO_INTERNET -eq 1 ]; then
+        echo "Public IP lookup skipped (--no-internet)."
+    elif ok curl; then
+        pub="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null)"
+        if [ -n "$pub" ]; then
+            echo "Public IP seen from the internet: $pub"
+            if [ "$pub" = "$IP" ]; then
+                echo "WARNING: the host IP equals the public IP. The host may be directly internet-facing."
+            else
+                echo "Host appears to sit behind NAT."
+            fi
+        else
+            echo "Could not determine the public IP (no outbound access)."
+        fi
+    else
+        echo "curl is not installed."
+    fi
+    echo
+    echo "Listening sockets bound to non-loopback addresses (exposure candidates):"
+    ss -tuln 2>/dev/null | grep -vE '127\.0\.0\.|\[::1\]|Local Address' || echo "  none"
+    echo
+    echo "NOTE: confirm no port forwarding, DMZ placement or cloud security-group exposure exists for this asset."
+}
+
+chk30() {
+    for b in firefox firefox-esr chromium chromium-browser google-chrome google-chrome-stable microsoft-edge-stable brave-browser; do
+        if ok "$b"; then
+            printf '  %-26s %s\n' "$b" "$(timeout 5 "$b" --version 2>/dev/null | head -1)"
+        fi
+    done
+    echo
+    if ok snap; then echo "Snap browsers:"; snap list 2>/dev/null | grep -iE 'firefox|chromium' || echo "  none"; echo; fi
+    if ok flatpak; then echo "Flatpak browsers:"; flatpak list 2>/dev/null | grep -iE 'firefox|chrom|brave|edge' || echo "  none"; echo; fi
+    echo "NOTE: compare each version with the current vendor stable release. Snap and Flatpak browsers update separately."
+}
+
+chk31() {
+    echo "Chromium-family extension IDs for the current user:"
+    for base in "$HOME/.config/google-chrome" "$HOME/.config/chromium" "$HOME/.config/microsoft-edge" "$HOME/.config/BraveSoftware/Brave-Browser"; do
+        [ -d "$base" ] || continue
+        echo "--- $base"
+        for prof in "$base"/Default "$base"/Profile*; do
+            [ -d "$prof/Extensions" ] || continue
+            echo "  profile $(basename "$prof"):"
+            ls "$prof/Extensions" 2>/dev/null | sed 's/^/    /'
+        done
+    done
+    echo
+    echo "Firefox extensions for the current user:"
+    for ff in "$HOME"/.mozilla/firefox/*.default*; do
+        [ -f "$ff/extensions.json" ] || continue
+        echo "--- $(basename "$ff")"
+        grep -oE '"id":"[^"]+"' "$ff/extensions.json" | sort -u | sed 's/^/  /'
+    done
+    echo
+    echo "NOTE: IDs are opaque. Map each to a name in the browser extension manager and compare with the approved list. Run as each user for full coverage."
+}
+
+chk32() {
+    echo "Settings-only review. Passwords are not read, decrypted, or copied."
+    echo
+    echo "Browser policies that control password saving:"
+    for d in /etc/opt/chrome/policies/managed /etc/chromium/policies/managed /etc/chromium-browser/policies/managed /etc/firefox/policies /usr/lib/firefox/distribution; do
+        [ -e "$d" ] || continue
+        grep -rhiE 'PasswordManagerEnabled|"PasswordManager' "$d" 2>/dev/null | sed "s|^|  [$d] |"
+    done
+    echo "  (no lines above = no password-manager policy is set)"
+    echo
+    echo "Credential store files (existence only, contents NOT read):"
+    for f in "$HOME"/.config/google-chrome/*/"Login Data" "$HOME"/.config/chromium/*/"Login Data" "$HOME"/.mozilla/firefox/*/logins.json; do
+        [ -e "$f" ] && echo "  PRESENT : $f"
+    done
+    echo
+    echo "NOTE: disable password saving by policy and use an approved password manager."
+}
+
+# -----------------------------------------------------------------------------
+# CHECKPOINTS 33-41: persistence, execution controls, logging, hardware
+# -----------------------------------------------------------------------------
+chk33() {
+    echo "Enabled systemd unit files:"
+    systemctl list-unit-files --state=enabled --no-pager 2>/dev/null | head -150
+    echo
+    echo "System crontab and cron.d:"
+    for f in /etc/crontab /etc/cron.d/*; do
+        [ -f "$f" ] || continue
+        echo "--- $f"
+        grep -vE '^\s*(#|$)' "$f"
+    done
+    echo
+    echo "rc.local and init.d:"
+    [ -x /etc/rc.local ] && echo "  /etc/rc.local exists and is executable"
+    ls /etc/init.d 2>/dev/null | sed 's/^/  /' | head -50
+    echo
+    echo "XDG autostart entries:"
+    for d in "$HOME/.config/autostart" /etc/xdg/autostart; do
+        [ -d "$d" ] && ls "$d" 2>/dev/null | sed "s|^|  $d/|"
+    done
+    echo
+    echo "NOTE: every persistence entry needs an owner and a business reason."
+}
+
+chk34() {
+    echo "Default login shells for local accounts:"
+    awk -F: '$7 ~ /sh$/ {print "  "$1" -> "$7}' /etc/passwd | head -40
+    echo
+    echo "Mount options for temporary locations (noexec blocks running binaries from them):"
+    for m in /tmp /var/tmp /dev/shm; do
+        opts="$(findmnt -no OPTIONS "$m" 2>/dev/null)"
+        if [ -z "$opts" ]; then
+            echo "  $m : not a separate mount"
+        elif echo "$opts" | grep -q noexec; then
+            echo "  $m : noexec ON  ($opts)"
+        else
+            echo "  $m : noexec NOT set  ($opts)"
+        fi
+    done
+    echo
+    echo "Shell history and idle timeout settings:"
+    grep -hE '^\s*(HISTSIZE|HISTFILESIZE|readonly TMOUT|export TMOUT)' /etc/profile /etc/bash.bashrc /etc/profile.d/* 2>/dev/null || echo "  defaults"
+    echo
+    echo "Sudo rules granting unrestricted shells:"
+    grep -rhE 'ALL=\(ALL(:ALL)?\)\s+ALL|/bin/(ba|z|da)?sh' /etc/sudoers /etc/sudoers.d 2>/dev/null | head -20 || true
+    echo
+    echo "BENCHMARK: /tmp, /var/tmp and /dev/shm mounted with noexec, nosuid, nodev where possible."
+}
+
+chk35() {
+    echo "auditd:"
+    systemctl is-active auditd 2>/dev/null || echo "  not active"
+    if ok auditctl && [ $ROOT -eq 1 ]; then
+        auditctl -s 2>/dev/null | head -5
+        echo "Loaded audit rules:"
+        auditctl -l 2>/dev/null | head -40
+    fi
+    echo
+    echo "Audit rule files:"
+    ls /etc/audit/rules.d 2>/dev/null | sed 's/^/  /'
+    grep -hvE '^\s*(#|$)' /etc/audit/rules.d/* 2>/dev/null | head -40
+    echo
+    echo "journald storage:"
+    if [ -d /var/log/journal ]; then echo "  persistent (/var/log/journal exists)"; else echo "  volatile only (logs lost on reboot)"; fi
+    grep -hE '^(Storage|SystemMaxUse|ForwardToSyslog)' /etc/systemd/journald.conf 2>/dev/null
+    echo
+    echo "rsyslog:"
+    systemctl is-active rsyslog 2>/dev/null
+    grep -hE '^\*\.\*\s+@@?' /etc/rsyslog.conf /etc/rsyslog.d/*.conf 2>/dev/null || echo "  no remote forwarding rule found"
+    echo
+    echo "Log rotation retention:"
+    grep -hE '^(rotate|weekly|daily|monthly)' /etc/logrotate.conf 2>/dev/null
+    echo
+    echo "Recent SSH and authentication events:"
+    journalctl -u ssh -u sshd --no-pager -n 10 2>/dev/null || tail -10 /var/log/auth.log 2>/dev/null || echo "  no authentication log available"
+    echo
+    echo "BENCHMARK: auditd running with rules for authentication, privilege use and command execution; logs persistent and forwarded."
+}
+
+chk36() {
+    echo "Processes running from temporary or user-writable locations:"
+    for p in /proc/[0-9]*; do
+        exe="$(readlink "$p/exe" 2>/dev/null)" || continue
+        case "$exe" in
+            /tmp/*|/var/tmp/*|/dev/shm/*|*/Downloads/*|*"(deleted)"*) echo "  pid=$(basename "$p")  exe=$exe" ;;
+        esac
+    done
+    echo
+    echo "Hidden regular files in temporary locations:"
+    find /tmp /var/tmp /dev/shm -maxdepth 2 -name '.*' -type f 2>/dev/null | head -20 | sed 's/^/  /'
+    echo
+    echo "ld.so.preload (library injection indicator):"
+    if [ -s /etc/ld.so.preload ]; then echo "  WARNING: present"; cat /etc/ld.so.preload; else echo "  not present or empty"; fi
+    echo
+    echo "SUID binaries outside standard system paths:"
+    find / -xdev -perm -4000 -type f 2>/dev/null | grep -vE '^/(usr/bin|usr/sbin|bin|sbin|usr/lib|usr/libexec|snap)/' | head -30 | sed 's/^/  /'
+    echo
+    echo "Rootkit scanner log (if installed):"
+    if [ -f /var/log/rkhunter.log ]; then tail -20 /var/log/rkhunter.log; else echo "  no rkhunter log"; fi
+    echo
+    echo "NOTE: this is an indicator review, not a forensic examination. Run rkhunter or chkrootkit separately for deeper coverage."
+}
+
+chk37() {
+    echo "Block devices and encryption layers:"
+    lsblk -o NAME,TYPE,FSTYPE,SIZE,MOUNTPOINT 2>/dev/null
+    echo
+    echo "Device-mapper (LUKS) mappings:"
+    ls /dev/mapper 2>/dev/null | grep -v control || echo "  none"
+    echo
+    if ok cryptsetup && [ $ROOT -eq 1 ]; then
+        for m in $(ls /dev/mapper 2>/dev/null | grep -v control); do
+            cryptsetup status "$m" 2>/dev/null | head -3
+        done
+    fi
+    echo
+    echo "/etc/crypttab:"
+    grep -vE '^\s*(#|$)' /etc/crypttab 2>/dev/null || echo "  none"
+    echo
+    echo "Root filesystem source: $(findmnt -no SOURCE / 2>/dev/null)"
+    echo
+    echo "TPM device:"
+    ls /dev/tpm* /sys/class/tpm 2>/dev/null || echo "  no TPM device found"
+    echo
+    echo "BENCHMARK: system disk encrypted (LUKS) with recovery keys escrowed; laptops at minimum."
+}
+
+chk38() {
+    echo "usb-storage kernel module:"
+    lsmod 2>/dev/null | grep -E '^usb_storage' || echo "  not loaded"
+    echo
+    echo "Module disable or blacklist rules:"
+    grep -rhE 'usb[-_]storage' /etc/modprobe.d 2>/dev/null || echo "  no rule found"
+    echo
+    echo "Attached removable block devices (RM=1):"
+    lsblk -l -o NAME,RM,TRAN,SIZE,MOUNTPOINT 2>/dev/null | awk 'NR==1 || $2=="1"'
+    echo
+    echo "Removable mounts in fstab:"
+    grep -iE 'usb|removable' /etc/fstab 2>/dev/null || echo "  none"
+    echo
+    echo "udev rules that mention storage or USB:"
+    grep -rhiE 'usb|storage' /etc/udev/rules.d 2>/dev/null | head -10
+    echo
+    echo "BENCHMARK: USB mass storage disabled or controlled on endpoints that handle sensitive data."
+}
+
+chk39() {
+    if [ -d /sys/firmware/efi ]; then
+        echo "Firmware boot mode: UEFI"
+        for f in /sys/firmware/efi/efivars/SecureBoot-*; do
+            [ -r "$f" ] || continue
+            echo "Secure Boot variable $(basename "$f"): last byte = $(od -An -t u1 "$f" 2>/dev/null | awk '{print $NF}')  (1 = enabled)"
+        done
+    else
+        echo "Firmware boot mode: Legacy BIOS (Secure Boot not available)"
+    fi
+    echo
+    if ok mokutil; then mokutil --sb-state 2>&1; else echo "mokutil not installed."; fi
+    echo
+    echo "Kernel lockdown mode:"
+    cat /sys/kernel/security/lockdown 2>/dev/null || echo "  not available"
+    echo
+    echo "BENCHMARK: Secure Boot enabled on all UEFI systems."
+}
+
+chk40() {
+    echo "systemd timers:"
+    systemctl list-timers --all --no-pager 2>/dev/null
+    echo
+    echo "Root crontab:"
+    if [ $ROOT -eq 1 ]; then crontab -l 2>/dev/null || echo "  none"; else echo "  requires root"; fi
+    echo
+    echo "System crontab and cron.d:"
+    grep -hvE '^\s*(#|$)' /etc/crontab /etc/cron.d/* 2>/dev/null
+    echo
+    echo "User crontab files:"
+    ls /var/spool/cron/crontabs 2>/dev/null | sed 's/^/  /' || echo "  none"
+    echo
+    echo "Cron directories or files writable by others (a tampering risk):"
+    find /etc/crontab /etc/cron.* -perm -o+w 2>/dev/null | sed 's/^/  /'
+    echo
+    echo "at queue:"
+    if ok atq; then atq 2>/dev/null; else echo "  at not installed"; fi
+    echo
+    echo "NOTE: every scheduled job must run a script owned by root and not writable by other users."
+}
+
+chk41() {
+    echo "AppArmor:"
+    if ok aa-status; then
+        aa-status 2>/dev/null | head -20 || echo "  requires root"
+    else
+        echo "  aa-status not installed"
+    fi
+    echo
+    echo "SELinux:"
+    if ok getenforce; then
+        echo "  mode: $(getenforce)"
+        ok sestatus && sestatus 2>/dev/null | head -5
+    else
+        echo "  SELinux tools not installed"
+    fi
+    echo
+    echo "fapolicyd (application allow-listing, RHEL family):"
+    systemctl is-active fapolicyd 2>/dev/null || echo "  not active"
+    echo
+    echo "BENCHMARK: one mandatory access control system enforcing (AppArmor enforce profiles, or SELinux Enforcing); allow-listing where required."
+}
+
+# -----------------------------------------------------------------------------
+# REGISTRY: N | Title | function | CIS v8.1 | ISO 27001:2022 | NIST 800-53 Rev.5
+# -----------------------------------------------------------------------------
+CHECKS=(
+"1|Asset Computer Name|chk01|1.1|A.5.9|CM-8"
+"2|Assigned User and Asset Owner|chk02|1.1|A.5.9|CM-8"
+"3|Operating System and Version|chk03|2.1|A.8.9|CM-2"
+"4|Domain Membership|chk04|5.6|A.5.15|AC-2"
+"5|Local Administrator Membership|chk05|5.4|A.8.2|AC-6"
+"6|Privileged Access and Sudo|chk06|5.4|A.8.2|AC-6"
+"7|Unauthorized User Accounts|chk07|5.1|A.5.18|AC-2"
+"8|Password Configuration|chk08|5.2|A.5.17|IA-5"
+"9|Automatic Screen Lock|chk09|4.3|A.8.1|AC-11"
+"10|Installation Rights|chk10|4.1|A.8.19|CM-11"
+"11|Last Security Update|chk11|7.3|A.8.8|SI-2"
+"12|Latest Cumulative Update|chk12|7.4|A.8.8|SI-2"
+"13|Antivirus Signature Update|chk13|10.1|A.8.7|SI-3"
+"14|Application Update Status|chk14|7.5|A.8.8|SI-2"
+"15|Unauthorized or Unlicensed Applications|chk15|2.1|A.5.32|CM-10"
+"16|Unnecessary Applications|chk16|2.3|A.8.19|CM-7"
+"17|Antivirus or EDR Installed|chk17|10.1|A.8.7|SI-3"
+"18|Antivirus Enabled and Running|chk18|10.1|A.8.7|SI-3"
+"19|Antivirus Engine and Signatures Updated|chk19|10.2|A.8.7|SI-3"
+"20|Antivirus Exclusions|chk20|10.1|A.8.7|SI-3"
+"21|Last Malware Scan|chk21|10.4|A.8.7|SI-3"
+"22|Host Firewall Enabled|chk22|4.4|A.8.20|SC-7"
+"23|Open Listening Ports|chk23|4.4|A.8.20|CM-7"
+"24|Unnecessary Network Services|chk24|4.8|A.8.9|CM-7"
+"25|Legacy SMB Protocol Disabled|chk25|4.8|A.8.21|CM-7"
+"26|Remote Access SSH Restricted|chk26|4.8|A.8.5|AC-17"
+"27|Network Shares and Exports|chk27|3.3|A.8.3|AC-3"
+"28|LAN and Wi-Fi Configuration|chk28|12.2|A.8.22|SC-7"
+"29|Public Internet Exposure|chk29|12.2|A.8.20|SC-7"
+"30|Browser Version and Updates|chk30|7.5|A.8.8|SI-2"
+"31|Unauthorized Browser Extensions|chk31|9.1|A.8.19|CM-7"
+"32|Saved Browser Passwords|chk32|5.2|A.5.17|IA-5"
+"33|Unauthorized Startup and Autorun|chk33|4.1|A.8.9|CM-6"
+"34|Shell and Script Execution Controls|chk34|2.5|A.8.19|CM-7"
+"35|Audit Logging|chk35|8.2|A.8.15|AU-2"
+"36|Malware Rootkit and Suspicious Process|chk36|10.5|A.8.7|SI-4"
+"37|Disk Encryption|chk37|3.6|A.8.24|SC-28"
+"38|Removable Media and USB|chk38|10.3|A.7.10|MP-7"
+"39|Secure Boot Status|chk39|4.1|A.8.9|SI-7"
+"40|Scheduled Tasks Review|chk40|4.1|A.8.9|CM-6"
+"41|Application Control and MAC|chk41|2.5|A.8.19|CM-7"
+)
+
+# -----------------------------------------------------------------------------
+# RUN
+# -----------------------------------------------------------------------------
+for entry in "${CHECKS[@]}"; do
+    IFS='|' read -r n title fn cis iso nist <<< "$entry"
+    run_check "$n" "$title" "$fn" "$cis" "$iso" "$nist"
+done
+
+# -----------------------------------------------------------------------------
+# COMPREHENSIVE REPORT (1 -> 41 order, with table of contents)
+# -----------------------------------------------------------------------------
+REPORT="$BASE/00_COMPREHENSIVE_REPORT_${HOST}_${IP_SAFE}_${TS}.txt"
+{
+    echo "=================================================================="
+    echo "COMPREHENSIVE LINUX ENDPOINT SECURITY COMPLIANCE AUDIT REPORT"
+    echo "=================================================================="
+    echo "Computer      : $HOST"
+    echo "IPv4          : $IP"
+    echo "Run as        : $(id -un) (root=$([ $ROOT -eq 1 ] && echo yes || echo no))"
+    echo "Generated     : $RUN_DT"
+    echo "Output folder : $BASE"
+    echo "Frameworks    : CIS Controls v8.1, ISO/IEC 27001:2022 Annex A, NIST SP 800-53 Rev.5"
+    echo "                (indicative mapping; verify against your own statements of applicability)"
+    echo "=================================================================="
+    echo
+    echo "TABLE OF CONTENTS"
+    echo "------------------------------------------------------------------"
+    for f in "$BASE"/[0-9][0-9]_*.txt; do
+        [ -f "$f" ] || continue
+        echo "  $(basename "$f")"
+    done
+    echo "------------------------------------------------------------------"
+    echo
+    for f in "$BASE"/[0-9][0-9]_*.txt; do
+        [ -f "$f" ] || continue
+        cat "$f"
+        echo
+    done
+    echo "=================================================================="
+    echo "END OF REPORT - $HOST ($IP) - $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "=================================================================="
+} > "$REPORT"
+
+# Give output back to the invoking user when run with sudo
+if [ -n "${SUDO_USER:-}" ] && id "$SUDO_USER" >/dev/null 2>&1; then
+    chown -R "$SUDO_USER":"$(id -gn "$SUDO_USER")" "$BASE" 2>/dev/null
+fi
+
+echo
+echo "=================================================================="
+echo " AUDIT COMPLETE"
+echo "=================================================================="
+echo " Checkpoints completed : 41 / 41"
+echo " Output folder         : $BASE"
+echo " Comprehensive report  : $(basename "$REPORT")"
+echo " Run log               : 00_RunLog.txt"
+echo "=================================================================="
