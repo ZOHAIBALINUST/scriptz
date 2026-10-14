@@ -1,0 +1,39 @@
+Enable Script Execution (Temporary)
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
+
+
+Enable Script Execution (Permanent for Current User)
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+
+Disable Script Execution (Revert to Default)
+Set-ExecutionPolicy -ExecutionPolicy Restricted -Scope CurrentUser
+
+Set-ExecutionPolicy -ExecutionPolicy Restricted -Scope LocalMachine
+
+
+
+# disable
+
+1. Temporary bypass (current PowerShell window only)
+
+Close the PowerShell window. The Process scope disappears when the session ends. To change it inside the same window:
+
+powershell
+
+Set-ExecutionPolicy -ExecutionPolicy Restricted -Scope Process
+
+2. Permanent setting for your user account
+
+powershell
+Set-ExecutionPolicy -ExecutionPolicy Restricted -Scope CurrentUser
+
+3. Machine-wide setting (requires an elevated PowerShell window, run as Administrator)
+
+powershell
+Set-ExecutionPolicy -ExecutionPolicy Restricted -Scope LocalMachine
+
+Check the current settings
+
+powershell
+Get-ExecutionPolicy -List
